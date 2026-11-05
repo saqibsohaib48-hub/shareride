@@ -1,0 +1,39 @@
+{
+  "expo": {
+    "name": "Share Ride",
+    "slug": "share-ride",
+    "scheme": "shareride",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "splash": { "image": "./assets/splash.png", "resizeMode": "contain", "backgroundColor": "#0e7c66" },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.example.shareride",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Share Ride uses your location to suggest nearby pickups and, during an active trip, to show your position to your ride partners.",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "config": { "googleMapsApiKey": "" }
+    },
+    "android": {
+      "package": "com.example.shareride",
+      "adaptiveIcon": { "foregroundImage": "./assets/adaptive-icon.png", "backgroundColor": "#0e7c66" },
+      "permissions": ["ACCESS_FINE_LOCATION", "POST_NOTIFICATIONS"],
+      "config": { "googleMaps": { "apiKey": "" } }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-localization",
+      ["expo-notifications", { "color": "#0e7c66" }],
+      ["@stripe/stripe-react-native", { "merchantIdentifier": "merchant.com.example.shareride", "enableGooglePay": true }]
+    ],
+    "extra": {
+      "router": { "origin": false },
+      "eas": { "projectId": "" }
+    },
+    "experiments": { "typedRoutes": false }
+  }
+}

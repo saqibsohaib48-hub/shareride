@@ -1,0 +1,16 @@
+{
+  "name": "share-ride",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Share Ride — Your Ride. Their Journey. Share the Way.",
+  "workspaces": ["packages/shared", "backend", "web"],
+  "scripts": {
+    "dev:api": "npm run dev -w backend",
+    "dev:web": "npm run dev -w web",
+    "db:migrate": "npm run db:migrate -w backend",
+    "db:seed": "npm run db:seed -w backend",
+    "test": "npm test -w packages/shared && npm test -w backend",
+    "typecheck": "npm run typecheck -w packages/shared && npm run typecheck -w backend && npm run typecheck -w web"
+  },
+  "engines": { "node": ">=20" }
+}
