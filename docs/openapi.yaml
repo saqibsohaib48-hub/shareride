@@ -1,0 +1,406 @@
+openapi: 3.0.3
+info:
+  title: Share Ride API
+  version: 0.1.0
+  description: |
+    Share Ride marketplace API. **All money is integer minor units** (e.g. `4750` = AED 47.50) and
+    **all percentages are basis points** (`500` = 5%).
+
+    **Authentication:** `Authorization: Bearer <accessToken>`. Access tokens last 15 min; rotate with `/auth/refresh`.
+    Reusing an old refresh token revokes the whole session family.
+
+    **Errors:** every error has the shape `{ "error": { "code", "message", "referenceId?", "details?" } }`.
+    `message` is safe to show users. Unexpected errors return `INTERNAL` with a `referenceId` (e.g. `SR-482913`) that support can look up in the logs.
+
+    **Permissions:** 🔓 public · 🔐 any logged-in user · 🛡️ staff role with the named permission.
+servers:
+  - url: http://localhost:4000
+    description: Local development
+  - url: https://api.example.com
+    description: Production (replace)
+
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer, bearerFormat: JWT }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: SEATS_UNAVAILABLE }
+            message: { type: string, example: Sorry, those seats were just taken. }
+            referenceId: { type: string, example: SR-482913 }
+            details: {}
+    Place:
+      type: object
+      required: [name, lat, lng]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 200, example: Dubai Marina, Dubai }
+        lat: { type: number, minimum: -90, maximum: 90, example: 25.0805 }
+        lng: { type: number, minimum: -180, maximum: 180, example: 55.1403 }
+    Tokens:
+      type: object
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        userId: { type: string, format: uuid }
+    PublicUser:
+      type: object
+      description: Only data needed for a ride. Never includes email, phone, documents or address.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: Ahmed K. }
+        photoUrl: { type: string, nullable: true }
+        rating: { type: number, example: 4.9 }
+        ratingCount: { type: integer }
+        completedRides: { type: integer }
+        memberSince: { type: string, format: date-time }
+        badges:
+          type: object
+          properties: { phone: { type: boolean }, email: { type: boolean }, identity: { type: boolean }, driver: { type: boolean } }
+        languages: { type: array, items: { type: string } }
+    Ride:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [DRAFT, PUBLISHED, DRIVER_READY, IN_PROGRESS, COMPLETED, CANCELLED_BY_DRIVER, EXPIRED, DISPUTED] }
+        driver: { $ref: '#/components/schemas/PublicUser' }
+        origin: { $ref: '#/components/schemas/Place' }
+        destination: { $ref: '#/components/schemas/Place' }
+        departureAt: { type: string, format: date-time }
+        arrivalEstimateAt: { type: string, format: date-time }
+        distanceMeters: { type: integer, description: Road (driving) distance }
+        durationSeconds: { type: integer }
+        seatsTotal: { type: integer }
+        seatsAvailable: { type: integer }
+        pricePerSeatMinor: { type: integer, example: 5000 }
+        currency: { type: string, example: AED }
+        instantBooking: { type: boolean }
+        womenOnly: { type: boolean }
+        vehicle: { type: object, nullable: true, description: Plate shown only to the driver and confirmed passengers }
+        isDemo: { type: boolean }
+        match:
+          type: object
+          description: Present in search results
+          properties: { score: { type: number }, pickupDeviationM: { type: integer }, dropoffDeviationM: { type: integer }, rank: { type: number } }
+    Breakdown:
+      type: object
+      description: Frozen price snapshot (spec §54/§55)
+      properties:
+        currency: { type: string }
+        seats: { type: integer }
+        pricePerSeatMinor: { type: integer, example: 5000 }
+        grossFareMinor: { type: integer, example: 5000, description: price × seats }
+        platformFeeMinor: { type: integer, example: 250, description: gross × fee% }
+        taxMinor: { type: integer, example: 0, description: Tax on the fee, separate component }
+        promoDiscountMinor: { type: integer }
+        passengerTotalMinor: { type: integer, example: 5000 }
+        driverEarningsMinor: { type: integer, example: 4750 }
+        feeBearer: { type: string, enum: [DRIVER, PASSENGER] }
+        platformFeeBps: { type: integer, example: 500 }
+    Booking:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        rideId: { type: string, format: uuid }
+        status: { type: string, enum: [REQUESTED, RESERVED, CONFIRMED, PASSENGER_PICKUP, IN_PROGRESS, COMPLETED, DECLINED, CANCELLED_BY_PASSENGER, CANCELLED_BY_DRIVER, EXPIRED, NO_SHOW, DISPUTED] }
+        seats: { type: integer }
+        pickup: { $ref: '#/components/schemas/Place' }
+        dropoff: { $ref: '#/components/schemas/Place' }
+        breakdown: { $ref: '#/components/schemas/Breakdown' }
+        expiresAt: { type: string, format: date-time, nullable: true, description: Seat hold expiry while RESERVED }
+        paymentStatus: { type: string, nullable: true, enum: [PENDING, AUTHORIZED, PAID, FAILED, REFUNDED, PARTIALLY_REFUNDED, CANCELLED] }
+        refundBps: { type: integer, nullable: true }
+  responses:
+    Error: { description: Error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Unauthorized: { description: Not logged in / expired token (401), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Forbidden: { description: Missing permission / suspended account (403), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Validation: { description: 'Validation error (400, code VALIDATION_ERROR, details = field errors)', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+security: [{ bearer: [] }]
+
+paths:
+  /health:
+    get: { summary: 🔓 Health check, security: [], responses: { '200': { description: OK } } }
+
+  # ───────── Auth ─────────
+  /auth/register:
+    post:
+      tags: [auth]
+      summary: 🔓 Register with email (rate limited)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, countryCode]
+              properties:
+                name: { type: string }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8, description: Must include a letter and a number }
+                phone: { type: string, example: '+971501234567' }
+                countryCode: { type: string, example: AE }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Tokens' } } } }
+        '400': { $ref: '#/components/responses/Validation' }
+        '409': { $ref: '#/components/responses/Error' }
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: 🔓 Email login
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [email, password], properties: { email: { type: string }, password: { type: string } } } } } }
+      responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Tokens' } } } }, '401': { $ref: '#/components/responses/Unauthorized' } }
+  /auth/otp/send:
+    post:
+      tags: [auth]
+      summary: 🔓 Send phone OTP (max 5 per 15 min per phone; 10/h per IP)
+      security: []
+      description: In development with SMS_PROVIDER=console the response includes `devCode`.
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [phone], properties: { phone: { type: string, example: '+971501234567' } } } } } }
+      responses: { '200': { description: Sent }, '429': { $ref: '#/components/responses/Error' } }
+  /auth/otp/verify:
+    post:
+      tags: [auth]
+      summary: 🔓/🔐 Verify OTP — logs in / registers by phone, or verifies the phone of the logged-in user
+      security: [{}, { bearer: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [phone, code], properties: { phone: { type: string }, code: { type: string, pattern: '^\d{6}$' }, name: { type: string, description: Required for new accounts }, countryCode: { type: string } } } } } }
+      responses: { '200': { description: OK }, '400': { $ref: '#/components/responses/Error' } }
+  /auth/google:
+    post: { tags: [auth], summary: 🔓 Sign in with Google (ID token verified server-side), security: [], requestBody: { content: { application/json: { schema: { type: object, properties: { idToken: { type: string } } } } } }, responses: { '200': { description: OK } } }
+  /auth/apple:
+    post: { tags: [auth], summary: 🔓 Sign in with Apple (identity token verified against Apple JWKS), security: [], requestBody: { content: { application/json: { schema: { type: object, properties: { identityToken: { type: string }, fullName: { type: string } } } } } }, responses: { '200': { description: OK } } }
+  /auth/refresh:
+    post: { tags: [auth], summary: 🔓 Rotate refresh token, security: [], requestBody: { content: { application/json: { schema: { type: object, properties: { refreshToken: { type: string } } } } } }, responses: { '200': { description: New tokens }, '401': { $ref: '#/components/responses/Unauthorized' } } }
+  /auth/logout:
+    post: { tags: [auth], summary: 🔓 Revoke refresh token, security: [], responses: { '204': { description: Done } } }
+  /auth/me:
+    get: { tags: [auth], summary: 🔐 Current user (private profile), responses: { '200': { description: OK }, '401': { $ref: '#/components/responses/Unauthorized' } } }
+
+  # ───────── Profile / users / vehicles / notifications ─────────
+  /profile:
+    get: { tags: [profile], summary: 🔐 My profile, responses: { '200': { description: OK } } }
+    patch:
+      tags: [profile]
+      summary: 🔐 Update profile & preferences (country, currency, language, notification prefs)
+      requestBody: { content: { application/json: { schema: { type: object, properties: { name: { type: string }, about: { type: string }, languages: { type: array, items: { type: string } }, countryCode: { type: string }, preferredCurrency: { type: string }, language: { type: string, enum: [en, ar, hi, ur, fr, es] }, gender: { type: string, enum: [female, male, other, undisclosed] }, notificationPrefs: { type: object, properties: { push: { type: boolean }, email: { type: boolean }, sms: { type: boolean } } } } } } } }
+      responses: { '200': { description: OK } }
+  /profile/delete:
+    post:
+      tags: [profile]
+      summary: 🔐 Delete my account (spec §81)
+      description: Blocked (409 DELETION_BLOCKED with reasons) while rides, bookings, payouts or balances are pending. Personal data is removed; financial records are retained for legal reasons.
+      requestBody: { content: { application/json: { schema: { type: object, properties: { password: { type: string } } } } } }
+      responses: { '204': { description: Deleted }, '409': { $ref: '#/components/responses/Error' } }
+  /profile/trusted-contacts:
+    get: { tags: [safety], summary: 🔐 List trusted contacts, responses: { '200': { description: OK } } }
+    post: { tags: [safety], summary: 🔐 Add trusted contact (encrypted at rest), responses: { '201': { description: Created } } }
+  /users/{id}:
+    get: { tags: [users], summary: 🔓 Public profile, security: [], parameters: [{ in: path, name: id, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PublicUser' } } } } } }
+  /users/{id}/block:
+    post: { tags: [safety], summary: 🔐 Block a user, parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '204': { description: Blocked } } }
+  /vehicles:
+    get: { tags: [vehicles], summary: 🔐 My vehicles, responses: { '200': { description: OK } } }
+    post:
+      tags: [vehicles]
+      summary: 🔐 Add vehicle
+      requestBody: { content: { application/json: { schema: { type: object, required: [make, model, color, licensePlate, vehicleType, seats], properties: { make: { type: string }, model: { type: string }, year: { type: integer }, color: { type: string }, licensePlate: { type: string }, vehicleType: { type: string, enum: [sedan, suv, hatchback, van, minivan, pickup, ev, other] }, seats: { type: integer } } } } } }
+      responses: { '201': { description: Created } }
+  /vehicles/{id}:
+    patch: { tags: [vehicles], summary: 🔐 Update vehicle (plate change resets verification), parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+    delete: { tags: [vehicles], summary: 🔐 Remove vehicle, parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '204': { description: Removed } } }
+  /notifications:
+    get: { tags: [notifications], summary: 🔐 In-app notifications + unread count, responses: { '200': { description: OK } } }
+  /notifications/read:
+    post: { tags: [notifications], summary: 🔐 Mark read (all, or by ids), responses: { '204': { description: Done } } }
+  /notifications/devices:
+    post: { tags: [notifications], summary: 🔐 Register push token (Expo push token), responses: { '204': { description: Done } } }
+
+  # ───────── Catalog / pricing / maps ─────────
+  /countries:
+    get: { tags: [catalog], summary: 🔓 Supported countries with compliance switches, security: [], responses: { '200': { description: OK } } }
+  /countries/detect:
+    get: { tags: [catalog], summary: 🔓 Detect country from edge geo header, security: [], responses: { '200': { description: Country or null } } }
+  /currencies:
+    get: { tags: [catalog], summary: 🔓 Currencies, security: [], responses: { '200': { description: OK } } }
+  /currencies/rates:
+    get: { tags: [catalog], summary: 🔓 Display-only FX rates (never used for charging), security: [], parameters: [{ in: query, name: base, schema: { type: string, default: USD } }], responses: { '200': { description: OK } } }
+  /pricing/{country}:
+    get: { tags: [pricing], summary: 🔓 Public pricing parameters for a country, security: [], parameters: [{ in: path, name: country, required: true, schema: { type: string, example: AE } }], responses: { '200': { description: OK }, '422': { $ref: '#/components/responses/Error' } } }
+  /routes/places:
+    get: { tags: [routes], summary: 🔓 Place search (Google Places / Mapbox Geocoding), security: [], parameters: [{ in: query, name: q, required: true, schema: { type: string } }, { in: query, name: country, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /routes/quote:
+    post:
+      tags: [routes, pricing]
+      summary: 🔓 Road route + suggested price + driver earnings preview
+      security: []
+      requestBody: { content: { application/json: { schema: { type: object, required: [countryCode, origin, destination], properties: { countryCode: { type: string }, origin: { $ref: '#/components/schemas/Place' }, destination: { $ref: '#/components/schemas/Place' }, seats: { type: integer }, pricePerSeatMinor: { type: integer } } } } } }
+      responses: { '200': { description: 'route {distanceMeters, durationSeconds, polyline}, suggestion {recommendedMinor, rangeMinMinor, rangeMaxMinor, allowedMinMinor, allowedMaxMinor}, fullRide {grossMinor, platformFeeMinor, driverEarningsMinor}' } }
+  /routes/popular:
+    get: { tags: [routes], summary: 🔓 Popular routes in a country, security: [], parameters: [{ in: query, name: country, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+
+  # ───────── Rides ─────────
+  /rides/search:
+    get:
+      tags: [rides]
+      summary: 🔓 Search rides with route matching & ranking
+      security: [{}, { bearer: [] }]
+      parameters:
+        - { in: query, name: fromLat, required: true, schema: { type: number } }
+        - { in: query, name: fromLng, required: true, schema: { type: number } }
+        - { in: query, name: toLat, required: true, schema: { type: number } }
+        - { in: query, name: toLng, required: true, schema: { type: number } }
+        - { in: query, name: departAfter, required: true, schema: { type: string, format: date-time } }
+        - { in: query, name: departBefore, required: true, schema: { type: string, format: date-time } }
+        - { in: query, name: time, schema: { type: string, format: date-time }, description: Preferred time for ranking }
+        - { in: query, name: seats, schema: { type: integer, default: 1 } }
+        - { in: query, name: womenOnly, schema: { type: boolean } }
+        - { in: query, name: pets, schema: { type: boolean } }
+        - { in: query, name: luggage, schema: { type: boolean } }
+        - { in: query, name: smoking, schema: { type: boolean } }
+        - { in: query, name: vehicleType, schema: { type: string } }
+        - { in: query, name: sort, schema: { type: string, enum: [best, cheapest, earliest, closest, rating, shortest], default: best } }
+      responses: { '200': { description: Ranked rides, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Ride' } } } } } }
+  /rides:
+    post:
+      tags: [rides]
+      summary: 🔐 Create ride (requires country verification level, own vehicle, price within admin limits)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [countryCode, origin, destination, departureAt, seats, pricePerSeatMinor, vehicleId]
+              properties:
+                countryCode: { type: string }
+                origin: { $ref: '#/components/schemas/Place' }
+                destination: { $ref: '#/components/schemas/Place' }
+                departureAt: { type: string, format: date-time }
+                seats: { type: integer }
+                pricePerSeatMinor: { type: integer }
+                vehicleId: { type: string, format: uuid }
+                instantBooking: { type: boolean, default: true }
+                luggageAllowed: { type: boolean }
+                petsAllowed: { type: boolean }
+                smokingAllowed: { type: boolean }
+                womenOnly: { type: boolean }
+                pickupFlexibilityM: { type: integer }
+                notes: { type: string }
+      responses: { '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Ride' } } } }, '403': { $ref: '#/components/responses/Forbidden' }, '422': { $ref: '#/components/responses/Error' } }
+  /rides/mine:
+    get: { tags: [rides], summary: 🔐 My rides as driver, parameters: [{ in: query, name: tab, schema: { type: string, enum: [upcoming, active, completed, cancelled] } }], responses: { '200': { description: OK } } }
+  /rides/{id}:
+    get: { tags: [rides], summary: '🔓 Ride details (exact coordinates + plate only for driver/confirmed passengers; driver also sees passengers & earnings)', security: [{}, { bearer: [] }], parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /rides/{id}/start:
+    post: { tags: [rides], summary: 🔐 Driver starts trip (≤ 2h before departure), parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK }, '409': { $ref: '#/components/responses/Error' } } }
+  /rides/{id}/complete:
+    post: { tags: [rides], summary: 🔐 Driver completes trip → earnings become available, parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /rides/{id}/cancel:
+    post: { tags: [rides], summary: 🔐 Driver cancels → passengers refunded per policy, parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+
+  # ───────── Bookings & payments ─────────
+  /bookings:
+    post:
+      tags: [bookings]
+      summary: 🔐 Book seats (instant → RESERVED with hold; approval → REQUESTED)
+      description: Transactional seat allocation; overbooking is impossible. `idempotencyKey` makes retries safe.
+      requestBody: { content: { application/json: { schema: { type: object, required: [rideId, seats, pickup, dropoff, idempotencyKey], properties: { rideId: { type: string }, seats: { type: integer }, pickup: { $ref: '#/components/schemas/Place' }, dropoff: { $ref: '#/components/schemas/Place' }, promoCode: { type: string }, idempotencyKey: { type: string } } } } } }
+      responses: { '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Booking' } } } }, '409': { $ref: '#/components/responses/Error' } }
+    get: { tags: [bookings], summary: 🔐 My trips as passenger, parameters: [{ in: query, name: tab, schema: { type: string, enum: [upcoming, active, completed, cancelled] } }], responses: { '200': { description: OK } } }
+  /bookings/{id}:
+    get: { tags: [bookings], summary: 🔐 Booking (passenger or driver only), parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /bookings/{id}/accept:
+    post: { tags: [bookings], summary: 🔐 Driver accepts request, parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /bookings/{id}/decline:
+    post: { tags: [bookings], summary: 🔐 Driver declines request (no payment captured), parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /bookings/{id}/cancel:
+    post: { tags: [bookings], summary: 🔐 Passenger cancels (refund per cancellation policy), parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /payments/checkout:
+    post:
+      tags: [payments]
+      summary: 🔐 Start payment for a RESERVED booking
+      description: Returns the provider client secret for Stripe PaymentElement/PaymentSheet. The amount comes from the server-side snapshot. **A successful client-side payment does not confirm the booking — only the verified webhook does.**
+      requestBody: { content: { application/json: { schema: { type: object, properties: { bookingId: { type: string } } } } } }
+      responses: { '200': { description: '{ paymentId, provider, clientSecret, amountMinor, currency, expiresAt }' }, '409': { $ref: '#/components/responses/Error' } }
+  /payments/mock/complete:
+    post: { tags: [payments], summary: '🔐 DEV ONLY (404 in production): simulate provider outcome via the real webhook path', responses: { '200': { description: OK } } }
+  /webhooks/payments:
+    post:
+      tags: [payments]
+      summary: Provider webhook (Stripe signature in `stripe-signature`)
+      security: []
+      description: Idempotent per event id. Verifies amount/currency against the stored payment; mismatches are rejected and flagged.
+      responses: { '200': { description: Received }, '400': { description: Invalid signature / amount mismatch } }
+
+  # ───────── Earnings / wallet / ratings / support ─────────
+  /earnings:
+    get: { tags: [earnings], summary: '🔐 Today / week / month / total per currency, wallet buckets and per-ride breakdown', responses: { '200': { description: OK } } }
+  /wallet/transactions:
+    get: { tags: [wallet], summary: 🔐 Wallet transaction history, responses: { '200': { description: OK } } }
+  /ratings:
+    post:
+      tags: [ratings]
+      summary: 🔐 Rate the other party after a COMPLETED booking (once)
+      requestBody: { content: { application/json: { schema: { type: object, required: [bookingId, stars], properties: { bookingId: { type: string }, stars: { type: integer, minimum: 1, maximum: 5 }, comment: { type: string }, categories: { type: object, properties: { communication: { type: integer }, punctuality: { type: integer }, cleanliness: { type: integer }, safety: { type: integer }, respect: { type: integer } } } } } } } }
+      responses: { '201': { description: Created }, '409': { $ref: '#/components/responses/Error' } }
+  /support/tickets:
+    get: { tags: [support], summary: 🔐 My tickets, responses: { '200': { description: OK } } }
+    post: { tags: [support], summary: '🔐 Open ticket (SAFETY → URGENT priority)', responses: { '201': { description: Created } } }
+
+  # ───────── Admin ─────────
+  /admin/dashboard:
+    get: { tags: [admin], summary: '🛡️ dashboard.view — KPIs per currency, conversion, repeat %, daily charts, by-country', parameters: [{ in: query, name: country, schema: { type: string } }, { in: query, name: days, schema: { type: integer, default: 30 } }, { in: query, name: currency, schema: { type: string, default: AED }, description: Display-only reporting currency }], responses: { '200': { description: OK }, '403': { $ref: '#/components/responses/Forbidden' } } }
+  /admin/users:
+    get: { tags: [admin], summary: 🛡️ users.view — search users, parameters: [{ in: query, name: q, schema: { type: string } }, { in: query, name: status, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /admin/users/{id}:
+    get: { tags: [admin], summary: '🛡️ users.view — profile, rides, bookings, payments, ratings, complaints, fraud flags', parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /admin/users/{id}/{action}:
+    post: { tags: [admin], summary: '🛡️ users.manage — suspend | reactivate | block (reason required, audited)', parameters: [{ in: path, name: id, required: true, schema: { type: string } }, { in: path, name: action, required: true, schema: { type: string, enum: [suspend, reactivate, block] } }], responses: { '200': { description: OK } } }
+  /admin/users/{id}/verification:
+    post: { tags: [admin], summary: '🛡️ users.manage — verify / reset identity or driver verification', parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /admin/vehicles/{id}/verification:
+    post: { tags: [admin], summary: 🛡️ users.manage — set vehicle verification status, parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /admin/rides:
+    get: { tags: [admin], summary: 🛡️ rides.view — search rides, responses: { '200': { description: OK } } }
+  /admin/rides/{id}:
+    get: { tags: [admin], summary: '🛡️ rides.view — ride, passengers, seat ledger', parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /admin/rides/{id}/cancel:
+    post: { tags: [admin], summary: 🛡️ rides.manage — cancel ride with full refunds, parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /admin/bookings/{id}/refund:
+    post: { tags: [admin], summary: 🛡️ payments.refund — refund passenger (partial or full), parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /admin/payments:
+    get: { tags: [admin], summary: 🛡️ payments.view — payments list, responses: { '200': { description: OK } } }
+  /admin/pricing:
+    get: { tags: [admin], summary: '🛡️ pricing.manage — pricing rules with full version history', responses: { '200': { description: OK } } }
+  /admin/pricing/{country}:
+    post: { tags: [admin], summary: '🛡️ pricing.manage — publish new pricing version (base, per-km, min/max fare, driver price limits, fee %, fee bearer, tax on fee)', parameters: [{ in: path, name: country, required: true, schema: { type: string } }], responses: { '201': { description: Created } } }
+  /admin/pricing/rules/{id}/{action}:
+    post: { tags: [admin], summary: '🛡️ pricing.manage — activate (rollback) / deactivate a version', parameters: [{ in: path, name: id, required: true, schema: { type: string } }, { in: path, name: action, required: true, schema: { type: string, enum: [activate, deactivate] } }], responses: { '200': { description: OK } } }
+  /admin/countries:
+    get: { tags: [admin], summary: 🛡️ countries.manage — list, responses: { '200': { description: OK } } }
+  /admin/countries/{code}:
+    patch: { tags: [admin], summary: '🛡️ countries.manage — enable/disable ride creation & bookings, women-only, verification requirements, withdrawal methods', parameters: [{ in: path, name: code, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /admin/cancellation-rules:
+    get: { tags: [admin], summary: 🛡️ pricing.manage — cancellation rules, responses: { '200': { description: OK } } }
+    put: { tags: [admin], summary: '🛡️ pricing.manage — set rules for a country (or global) and ride type', responses: { '200': { description: OK } } }
+  /admin/settings:
+    get: { tags: [admin], summary: 🛡️ settings.manage — platform settings, responses: { '200': { description: OK } } }
+  /admin/settings/{key}:
+    put: { tags: [admin], summary: 🛡️ settings.manage — update a setting, parameters: [{ in: path, name: key, required: true, schema: { type: string } }], responses: { '204': { description: Saved } } }
+  /admin/audit-logs:
+    get: { tags: [admin], summary: '🛡️ audit.view — search by action prefix, entity, actor', responses: { '200': { description: OK } } }
+  /admin/fraud-flags:
+    get: { tags: [admin], summary: 🛡️ users.view — fraud flags for human review, responses: { '200': { description: OK } } }
+  /admin/fraud-flags/{id}:
+    patch: { tags: [admin], summary: 🛡️ users.manage — review a flag, parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
+  /admin/announcements:
+    post: { tags: [admin], summary: '🛡️ settings.manage — in-app + push announcement to all / country / drivers / passengers', responses: { '200': { description: OK } } }
+  /admin/support/tickets:
+    get: { tags: [admin], summary: 🛡️ support.manage — tickets queue, responses: { '200': { description: OK } } }
+  /admin/support/tickets/{id}:
+    patch: { tags: [admin], summary: '🛡️ support.manage — status + internal/public notes', parameters: [{ in: path, name: id, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }

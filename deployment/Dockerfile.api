@@ -1,0 +1,25 @@
+# Share Ride API — build from the repository root:
+#   docker build -f deployment/Dockerfile.api -t share-ride-api .
+FROM node:22-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json* ./
+COPY packages/shared/package.json packages/shared/
+COPY backend/package.json backend/
+COPY web/package.json web/
+RUN npm ci --workspace backend --workspace packages/shared --include-workspace-root=false --omit=dev || npm install --workspace backend --workspace packages/shared --omit=dev
+
+FROM node:22-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+RUN addgroup -S app && adduser -S app -G app
+COPY --from=deps /app/node_modules ./node_modules
+COPY packages/shared ./packages/shared
+COPY backend ./backend
+COPY database ./database
+COPY docs/openapi.yaml ./docs/openapi.yaml
+USER app
+WORKDIR /app/backend
+EXPOSE 4000
+HEALTHCHECK --interval=30s --timeout=5s CMD wget -qO- http://localhost:4000/health || exit 1
+# Run migrations as a separate release step: `docker run ... npx tsx src/migrate.ts`
+CMD ["npx", "tsx", "src/server.ts"]
